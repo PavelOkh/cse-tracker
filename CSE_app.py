@@ -53,11 +53,11 @@ def process_single_number(number):
         waybill_info = history_dict.get('waybill_info', [])
         order_info = history_dict.get('order_info', [])
         
-        # 1. Проверяем, является ли сам этот трек дочерним (возвратным / досылочным)
+        # Определяем, является ли сам этот запрашиваемый трек дочерним (возвратным)
         is_child_waybill = "возврат" in state.lower() or "добавочная" in info.lower() or "регламент" in info.lower() or "retunwaybill" in str(track_data).lower() or "возвратная" in str(track_data).lower()
         
+        # СЦЕНАРИЙ А: Запрошенный номер — ДОЧЕРНИЙ (ищем его родителя)
         if is_child_waybill:
-            # Если это ребенок, ищем в истории его родителя (изначальный номер)
             all_events = waybill_info + order_info
             for event in all_events:
                 ev_info = event.get("EventInfo", "")
@@ -69,31 +69,40 @@ def process_single_number(number):
                         break
                 if original_waybill_number:
                     break
+        # СЦЕНАРИЙ Б: Запрошенный номер — РОДИТЕЛЬСКИЙ (ищем дочерний в Document)
+        else:
+            for event in waybill_info:
+                doc = event.get('Document')
+                if doc and isinstance(doc, dict):
+                    doc_number = doc.get('Number', '')
+                    doc_state = doc.get('State', '')
+                    if doc_number and doc_number != number:
+                        new_waybill_number = doc_number
+                        new_state = doc_state
+                        
+                        doc_history = doc.get('History', [])
+                        if doc_history:
+                            new_last_status_date = doc_history[0].get('EventDate', '')
+                            
+                        for sub_event in doc_history:
+                            if "Доставка завершена" in sub_event.get('EventName', ''):
+                                new_delivery_date = sub_event.get('EventDate', '')
+                                break
+                        break
 
-        # 2. Ищем дочерний документ (если текущий номер — родитель)
+            if not new_waybill_number and ("возврат" in state.lower() or "возвращается" in current_status.lower()):
+                parts = current_status.split()
+                for p in parts:
+                    cleaned_p = p.strip(".,;")
+                    if "497-" in cleaned_p and cleaned_p != number:
+                        new_waybill_number = cleaned_p
+                        break
+
         for event in waybill_info:
             event_name = event.get('EventName', '')
             event_name_en = event.get('EventNameEn', '')
             event_date = event.get('EventDate', '')
             
-            doc = event.get('Document')
-            if doc and isinstance(doc, dict):
-                doc_number = doc.get('Number', '')
-                doc_state = doc.get('State', '')
-                if doc_number and doc_number != number:
-                    new_waybill_number = doc_number
-                    new_state = doc_state
-                    
-                    doc_history = doc.get('History', [])
-                    if doc_history:
-                        new_last_status_date = doc_history[0].get('EventDate', '')
-                        
-                    for sub_event in doc_history:
-                        if "Доставка завершена" in sub_event.get('EventName', ''):
-                            new_delivery_date = sub_event.get('EventDate', '')
-                            break
-                    break
-
             if "Доставка завершена" in event_name or event_name_en == "Delivery completed":
                 current_status = "Доставка завершена"
                 delivery_date = event_date
@@ -106,13 +115,6 @@ def process_single_number(number):
 
         if "возврат" in state.lower() or "возвращается" in current_status.lower():
             highlight_type = "красный"
-            if not new_waybill_number and "497-" in current_status:
-                parts = current_status.split()
-                for p in parts:
-                    cleaned_p = p.strip(".,;")
-                    if "497-" in cleaned_p and cleaned_p != number:
-                        new_waybill_number = cleaned_p
-                        break
         elif new_waybill_number or "добавочная" in current_status.lower() or "смена" in current_status.lower():
             highlight_type = "фиолетовый"
 
