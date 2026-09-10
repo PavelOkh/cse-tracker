@@ -11,18 +11,6 @@ from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="CSE Трекинг", page_icon="📦", layout="wide")
 
-def extract_original_number_from_history(waybill_info, order_info, current_number):
-    """Ищет изначальный (родительский) номер накладной в истории дочернего отправления"""
-    all_events = waybill_info + order_info
-    for event in all_events:
-        info = event.get("EventInfo", "")
-        matches = re.findall(r'(497-[\d\-A-Z]+)', info)
-        for match in matches:
-            cleaned_match = match.strip(".,;")
-            if cleaned_match != current_number:
-                return cleaned_match
-    return ""
-
 def process_single_number(number):
     url = f'https://lk.cse.ru/api/new-track/{number}'
     headers = {
@@ -65,9 +53,24 @@ def process_single_number(number):
         waybill_info = history_dict.get('waybill_info', [])
         order_info = history_dict.get('order_info', [])
         
-        # Проверяем, является ли текущий запрашиваемый номер дочерним (возвратным/добавочным)
+        # 1. Проверяем, является ли сам этот трек дочерним (возвратным / досылочным)
         is_child_waybill = "возврат" in state.lower() or "добавочная" in info.lower() or "регламент" in info.lower() or "retunwaybill" in str(track_data).lower() or "возвратная" in str(track_data).lower()
         
+        if is_child_waybill:
+            # Если это ребенок, ищем в истории его родителя (изначальный номер)
+            all_events = waybill_info + order_info
+            for event in all_events:
+                ev_info = event.get("EventInfo", "")
+                matches = re.findall(r'(497-[\d\-A-Z]+)', ev_info)
+                for match in matches:
+                    cleaned = match.strip(".,;")
+                    if cleaned != number:
+                        original_waybill_number = cleaned
+                        break
+                if original_waybill_number:
+                    break
+
+        # 2. Ищем дочерний документ (если текущий номер — родитель)
         for event in waybill_info:
             event_name = event.get('EventName', '')
             event_name_en = event.get('EventNameEn', '')
@@ -97,10 +100,6 @@ def process_single_number(number):
                 last_status_date = ""
                 highlight_type = "нет"
                 break
-
-        # Если это дочерний номер — извлекаем его изначального родителя
-        if is_child_waybill:
-            original_waybill_number = extract_original_number_from_history(waybill_info, order_info, number)
 
         if waybill_info:
             last_status_date = waybill_info[0].get('EventDate', '')
