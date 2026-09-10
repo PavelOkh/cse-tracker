@@ -11,6 +11,16 @@ from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="CSE Трекинг", page_icon="📦", layout="wide")
 
+def extract_original_number_from_history(waybill_info, order_info):
+    """Извлекает из истории дочернего отправления номер изначальной накладной"""
+    all_events = waybill_info + order_info
+    for event in all_events:
+        info = event.get("EventInfo", "")
+        matches = re.findall(r'(497-[\d\-A-Z]+)', info)
+        for match in matches:
+            return match.strip(".,;")
+    return ""
+
 def process_single_number(number):
     url = f'https://lk.cse.ru/api/new-track/{number}'
     headers = {
@@ -29,7 +39,7 @@ def process_single_number(number):
         if not found_items:
             return {
                 "Накладная": number, "Статус": "Данные не найдены", "Дата доставки": "",
-                "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+                "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
                 "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
             }
             
@@ -41,6 +51,7 @@ def process_single_number(number):
         current_status = f"{state}. {info}" if info else state
         delivery_date = ""
         last_status_date = ""
+        original_waybill_number = ""
         new_waybill_number = ""
         new_state = ""
         new_delivery_date = ""
@@ -50,7 +61,14 @@ def process_single_number(number):
 
         history_dict = track_data.get('History', {})
         waybill_info = history_dict.get('waybill_info', [])
+        order_info = history_dict.get('order_info', [])
         
+        is_child_waybill = "возврат" in state.lower() or "добавочная" in info.lower() or "регламент" in info.lower() or "retunwaybill" in str(track_data).lower()
+        if is_child_waybill or "возвратная" in str(track_data).lower():
+            original_waybill_number = extract_original_number_from_history(waybill_info, order_info)
+            if original_waybill_number == number:
+                original_waybill_number = ""
+
         if waybill_info:
             last_status_date = waybill_info[0].get('EventDate', '')
 
@@ -63,7 +81,7 @@ def process_single_number(number):
             if doc and isinstance(doc, dict):
                 doc_number = doc.get('Number', '')
                 doc_state = doc.get('State', '')
-                if doc_number:
+                if doc_number and doc_number != number:
                     new_waybill_number = doc_number
                     new_state = doc_state
                     
@@ -89,7 +107,7 @@ def process_single_number(number):
             if not new_waybill_number and "497-" in current_status:
                 parts = current_status.split()
                 for p in parts:
-                    if "497-" in p:
+                    if "497-" in p and p.strip(".,;") != number:
                         new_waybill_number = p.strip(".,;")
                         break
         elif new_waybill_number or "добавочная" in current_status.lower() or "смена" in current_status.lower():
@@ -103,6 +121,7 @@ def process_single_number(number):
             "Статус": current_status,
             "Дата доставки": delivery_date,
             "Дата посл. статуса": last_status_date if current_status != "Доставка завершена" else "",
+            "Изначальный номер": original_waybill_number,
             "Новый номер": new_waybill_number,
             "Статус нового номера": new_state,
             "Дата доставки нового": new_delivery_date,
@@ -113,7 +132,7 @@ def process_single_number(number):
     except Exception as e:
         return {
             "Накладная": number, "Статус": "Ошибка обработки", "Дата доставки": "",
-            "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+            "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
             "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
         }
 
@@ -231,13 +250,13 @@ def main():
                 if num == "":
                     final_results.append({
                         "Накладная": "", "Статус": "Пустая строка", "Дата доставки": "",
-                        "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+                        "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
                         "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "нет"
                     })
                 else:
                     final_results.append(results_dict.get(num, {
                         "Накладная": num, "Статус": "Ошибка кэша", "Дата доставки": "",
-                        "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+                        "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
                         "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
                     }))
             
@@ -273,7 +292,7 @@ def main():
             elif display_filter == "Доставленные":
                 df_filtered = df_output[df_output["Статус"] == "Доставка завершена"]
                 
-            # Применяем раскраску и скрываем техническую колонку
+            # Применение раскраски и скрытие технической колонки
             styled_df = df_filtered.style.apply(color_rows, axis=1)
             styled_df = styled_df.hide(subset=["Тип подсветки"], axis="columns")
             
