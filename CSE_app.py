@@ -154,11 +154,22 @@ def generate_colored_excel(df_data):
     final_output.seek(0)
     return final_output.getvalue()
 
+# Функция для подсветки строк в Pandas Styler
+def color_rows(row):
+    h_type = row["Тип подсветки"]
+    if h_type == "желтый":
+        return ['background-color: #fff2cc'] * len(row)
+    elif h_type == "фиолетовый":
+        return ['background-color: #e1d5e7'] * len(row)
+    elif h_type == "красный":
+        return ['background-color: #f8cecc'] * len(row)
+    return [''] * len(row)
+
 def main():
     st.title("📦 Массовая проверка накладных CSE")
     st.write("Инструмент автоматического отслеживания отправлений с сохранением порядка строк.")
 
-    with st.expander("🎨 Справка по цветовой индикации в скачанном Excel-файле"):
+    with st.expander("🎨 Справка по цветовой индикации"):
         st.markdown("""
         * 🟨 **Желтый фон** — доставка в процессе / не завершена.
         * 🟪 **Фиолетовый фон** — смена номера накладной (досыл / добавочная).
@@ -188,7 +199,7 @@ def main():
             except Exception as e:
                 st.error(f"Ошибка при чтении файла: {e}")
     else:
-        raw_text = st.text_area("Вставьте список накладных (поддерживаются разделители: перенос строки, табуляция, запятая, точка с запятой):", height=150)
+        raw_text = st.text_area("Вставьте список накладных (разделители: перенос строки, табуляция, запятая, точка с запятой):", height=150)
         if raw_text:
             items = re.split(r'[\r\n,\t;]+', raw_text)
             tracking_list = [item.strip() for item in items if item.strip()]
@@ -236,7 +247,7 @@ def main():
             
             df_output = pd.DataFrame(final_results)
             
-            # Сводные метрики
+            # Сводные метрики с цветовыми акцентами
             total_count = len(final_results)
             delivered_count = sum(1 for r in final_results if r["Тип подсветки"] == "нет" and r["Статус"] == "Доставка завершена")
             yellow_count = sum(1 for r in final_results if r["Тип подсветки"] == "желтый")
@@ -244,26 +255,28 @@ def main():
             red_count = sum(1 for r in final_results if r["Тип подсветки"] == "красный")
             
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Всего строк", total_count)
-            m2.metric("Доставлено", delivered_count)
-            m3.metric("В пути / Ожидание", yellow_count)
-            m4.metric("Смена номера", purple_count)
-            m5.metric("Возвраты", red_count)
+            m1.metric("📦 Всего строк", total_count)
+            m2.metric("✅ Доставлено", delivered_count)
+            m3.metric("🟨 В пути / Ожидание", yellow_count)
+            m4.metric("🟪 Смена номера", purple_count)
+            m5.metric("🟥 Возвраты", red_count)
             
-            # Фильтрация отображения на экране
+            # Фильтрация отображения
             display_filter = st.selectbox("Фильтр отображения в таблице ниже:", ["Все строки", "Только в пути (желтые)", "Смена номера (фиолетовые)", "Возвраты (красные)", "Доставленные"])
             
-            df_display = df_output.drop(columns=["Тип подсветки"])
+            df_filtered = df_output.copy()
             if display_filter == "Только в пути (желтые)":
-                df_display = df_output[df_output["Тип подсветки"] == "желтый"].drop(columns=["Тип подсветки"])
+                df_filtered = df_output[df_output["Тип подсветки"] == "желтый"]
             elif display_filter == "Смена номера (фиолетовые)":
-                df_display = df_output[df_output["Тип подсветки"] == "фиолетовый"].drop(columns=["Тип подсветки"])
+                df_filtered = df_output[df_output["Тип подсветки"] == "фиолетовый"]
             elif display_filter == "Возвраты (красные)":
-                df_display = df_output[df_output["Тип подсветки"] == "красный"].drop(columns=["Тип подсветки"])
+                df_filtered = df_output[df_output["Тип подсветки"] == "красный"]
             elif display_filter == "Доставленные":
-                df_display = df_output[df_output["Статус"] == "Доставка завершена"].drop(columns=["Тип подсветки"])
+                df_filtered = df_output[df_output["Статус"] == "Доставка завершена"]
                 
-            st.dataframe(df_display, use_container_width=True)
+            # Применяем раскраску строк в таблице Streamlit (скрывая техническую колонку Тип подсветки)
+            styled_df = df_filtered.drop(columns=["Тип подсветки"]).style.apply(color_rows, axis=1)
+            st.dataframe(styled_df, use_container_width=True)
             
             # Генерация Excel для скачивания
             excel_data = generate_colored_excel(df_output)
