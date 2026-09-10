@@ -2,14 +2,14 @@ import requests
 import pandas as pd
 import time
 import io
+import re
 import streamlit as st
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import openpyxl
 from openpyxl.styles import PatternFill
 
-# Настройка страницы браузера
-st.set_page_config(page_title="CSE Трекинг", page_icon="📦", layout="centered")
+st.set_page_config(page_title="CSE Трекинг", page_icon="📦", layout="wide")
 
 def process_single_number(number):
     url = f'https://lk.cse.ru/api/new-track/{number}'
@@ -118,7 +118,6 @@ def process_single_number(number):
         }
 
 def generate_colored_excel(df_data):
-    # Создаем Excel в памяти через openpyxl для раскраски
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_data.to_excel(writer, index=False, sheet_name='Результат')
@@ -157,83 +156,127 @@ def generate_colored_excel(df_data):
 
 def main():
     st.title("📦 Массовая проверка накладных CSE")
-    st.write("Загрузите Excel-файл с номерами накладных в первом столбце. Сохраняется исходный порядок и количество строк.")
+    st.write("Инструмент автоматического отслеживания отправлений с сохранением порядка строк.")
 
-    # Информационный блок с описанием цветовой индикации
     with st.expander("🎨 Справка по цветовой индикации в скачанном Excel-файле"):
         st.markdown("""
-        В готовом отчете строки автоматически подсвечиваются цветом для быстрого визуального контроля:
-        * 🟨 **Желтый фон** — доставка еще в процессе / не завершена.
-        * 🟪 **Фиолетовый фон** — по отправлению произошла смена номера накладной (досыл / добавочная накладная).
-        * 🟥 **Красный фон** — оформлен возврат отправления отправителю.
+        * 🟨 **Желтый фон** — доставка в процессе / не завершена.
+        * 🟪 **Фиолетовый фон** — смена номера накладной (досыл / добавочная).
+        * 🟥 **Красный фон** — оформлен возврат отправителю.
         * *Без заливки* — доставка успешно завершена.
         """)
 
-    uploaded_file = st.file_uploader("Выберите файл .xlsx", type=["xlsx", "xls"])
+    input_method = st.radio("Выберите способ ввода данных:", ["📁 Загрузить файл (Excel / CSV)", "📋 Вставить списком из буфера обмена"])
+    
+    tracking_list = []
+    
+    if input_method == "📁 Загрузить файл (Excel / CSV)":
+        uploaded_file = st.file_uploader("Перетащите файл сюда или нажмите Browse", type=["xlsx", "xls", "csv"])
+        if uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    try:
+                        df_input = pd.read_csv(uploaded_file, encoding='utf-8')
+                    except:
+                        df_input = pd.read_csv(uploaded_file, encoding='cp1251')
+                else:
+                    df_input = pd.read_excel(uploaded_file)
+                
+                columns = df_input.columns.tolist()
+                selected_column = st.selectbox("Выберите столбец с номерами накладных:", columns, index=0)
+                tracking_list = df_input[selected_column].tolist()
+            except Exception as e:
+                st.error(f"Ошибка при чтении файла: {e}")
+    else:
+        raw_text = st.text_area("Вставьте список накладных (поддерживаются разделители: перенос строки, табуляция, запятая, точка с запятой):", height=150)
+        if raw_text:
+            items = re.split(r'[\r\n,\t;]+', raw_text)
+            tracking_list = [item.strip() for item in items if item.strip()]
+            if len(tracking_list) > 1000:
+                st.warning("⚠️ Внимание: вставлено более 1000 номеров. Для стабильной работы будут обработаны первые 1000.")
+                tracking_list = tracking_list[:1000]
 
-    if uploaded_file is not None:
-        try:
-            df_input = pd.read_excel(uploaded_file)
-            original_tracking_list = df_input.iloc[:, 0].tolist()
+    if tracking_list:
+        original_list = [str(num).strip() if pd.notna(num) else "" for num in tracking_list]
+        unique_numbers = list(dict.fromkeys([num for num in original_list if num]))
+        
+        st.info(f"Всего строк для обработки: **{len(original_list)}** | Уникальных номеров для API: **{len(unique_numbers)}**")
+        
+        if st.button("🚀 Начать проверку", type="primary"):
+            start_time = time.time()
+            my_bar = st.progress(0, text="Идет опрос API CSE. Пожалуйста, подождите...")
             
-            original_list = [str(num).strip() if pd.notna(num) else "" for num in original_tracking_list]
-            unique_numbers = list(dict.fromkeys([num for num in original_list if num]))
+            unique_results = []
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(process_single_number, num) for num in unique_numbers]
+                for i, future in enumerate(as_completed(futures)):
+                    unique_results.append(future.result())
+                    progress = (i + 1) / len(unique_numbers)
+                    my_bar.progress(progress, text=f"Обработано {i + 1} из {len(unique_numbers)} уникальных номеров...")
             
-            st.info(f"Всего строк в файле: **{len(original_list)}** | Уникальных номеров для API: **{len(unique_numbers)}**")
+            results_dict = {res["Накладная"]: res for res in unique_results}
             
-            if st.button("Начать проверку", type="primary"):
-                start_time = time.time()
-                my_bar = st.progress(0, text="Идет опрос API CSE. Пожалуйста, подождите...")
+            final_results = []
+            for num in original_list:
+                if num == "":
+                    final_results.append({
+                        "Накладная": "", "Статус": "Пустая строка", "Дата доставки": "",
+                        "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+                        "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "нет"
+                    })
+                else:
+                    final_results.append(results_dict.get(num, {
+                        "Накладная": num, "Статус": "Ошибка кэша", "Дата доставки": "",
+                        "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
+                        "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
+                    }))
+            
+            elapsed_time = round(time.time() - start_time, 1)
+            st.success(f"✅ Проверка завершена за {elapsed_time} сек.")
+            
+            df_output = pd.DataFrame(final_results)
+            
+            # Сводные метрики
+            total_count = len(final_results)
+            delivered_count = sum(1 for r in final_results if r["Тип подсветки"] == "нет" and r["Статус"] == "Доставка завершена")
+            yellow_count = sum(1 for r in final_results if r["Тип подсветки"] == "желтый")
+            purple_count = sum(1 for r in final_results if r["Тип подсветки"] == "фиолетовый")
+            red_count = sum(1 for r in final_results if r["Тип подсветки"] == "красный")
+            
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Всего строк", total_count)
+            m2.metric("Доставлено", delivered_count)
+            m3.metric("В пути / Ожидание", yellow_count)
+            m4.metric("Смена номера", purple_count)
+            m5.metric("Возвраты", red_count)
+            
+            # Фильтрация отображения на экране
+            display_filter = st.selectbox("Фильтр отображения в таблице ниже:", ["Все строки", "Только в пути (желтые)", "Смена номера (фиолетовые)", "Возвраты (красные)", "Доставленные"])
+            
+            df_display = df_output.drop(columns=["Тип подсветки"])
+            if display_filter == "Только в пути (желтые)":
+                df_display = df_output[df_output["Тип подсветки"] == "желтый"].drop(columns=["Тип подсветки"])
+            elif display_filter == "Смена номера (фиолетовые)":
+                df_display = df_output[df_output["Тип подсветки"] == "фиолетовый"].drop(columns=["Тип подсветки"])
+            elif display_filter == "Возвраты (красные)":
+                df_display = df_output[df_output["Тип подсветки"] == "красный"].drop(columns=["Тип подсветки"])
+            elif display_filter == "Доставленные":
+                df_display = df_output[df_output["Статус"] == "Доставка завершена"].drop(columns=["Тип подсветки"])
                 
-                unique_results = []
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = [executor.submit(process_single_number, num) for num in unique_numbers]
-                    for i, future in enumerate(as_completed(futures)):
-                        unique_results.append(future.result())
-                        progress = (i + 1) / len(unique_numbers)
-                        my_bar.progress(progress, text=f"Обработано {i + 1} из {len(unique_numbers)} уникальных номеров...")
-                
-                results_dict = {res["Накладная"]: res for res in unique_results}
-                
-                final_results = []
-                for num in original_list:
-                    if num == "":
-                        final_results.append({
-                            "Накладная": "", "Статус": "Пустая строка", "Дата доставки": "",
-                            "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
-                            "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "нет"
-                        })
-                    else:
-                        final_results.append(results_dict.get(num, {
-                            "Накладная": num, "Статус": "Ошибка кэша", "Дата доставки": "",
-                            "Дата посл. статуса": "", "Новый номер": "", "Статус нового номера": "",
-                            "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
-                        }))
-                
-                elapsed_time = round(time.time() - start_time, 1)
-                st.success(f"✅ Проверка завершена за {elapsed_time} сек.")
-                
-                df_output = pd.DataFrame(final_results)
-                
-                # Показываем таблицу на экране (без технической колонки типа подсветки)
-                st.dataframe(df_output.drop(columns=["Тип подсветки"]), use_container_width=True)
-                
-                # Генерируем цветной Excel в памяти
-                excel_data = generate_colored_excel(df_output)
-                
-                current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                original_name = uploaded_file.name.rsplit('.', 1)[0]
-                download_name = f"{original_name}_Результат_{current_time}.xlsx"
-                
-                st.download_button(
-                    label="📥 Скачать результат с раскраской (Excel)",
-                    data=excel_data,
-                    file_name=download_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
-        except Exception as e:
-            st.error(f"Произошла ошибка при обработке файла: {e}")
+            st.dataframe(df_display, use_container_width=True)
+            
+            # Генерация Excel для скачивания
+            excel_data = generate_colored_excel(df_output)
+            
+            current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            download_name = f"CSE_Результат_{current_time}.xlsx"
+            
+            st.download_button(
+                label="📥 Скачать полный результат с раскраской (Excel)",
+                data=excel_data,
+                file_name=download_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 if __name__ == "__main__":
     main()
