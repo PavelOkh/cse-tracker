@@ -154,7 +154,6 @@ def generate_colored_excel(df_data):
     final_output.seek(0)
     return final_output.getvalue()
 
-# Функция для подсветки строк в Pandas Styler
 def color_rows(row):
     h_type = row["Тип подсветки"]
     if h_type == "желтый":
@@ -247,7 +246,7 @@ def main():
             
             df_output = pd.DataFrame(final_results)
             
-            # Сводные метрики с цветовыми акцентами
+            # Сводные метрики
             total_count = len(final_results)
             delivered_count = sum(1 for r in final_results if r["Тип подсветки"] == "нет" and r["Статус"] == "Доставка завершена")
             yellow_count = sum(1 for r in final_results if r["Тип подсветки"] == "желтый")
@@ -274,8 +273,10 @@ def main():
             elif display_filter == "Доставленные":
                 df_filtered = df_output[df_output["Статус"] == "Доставка завершена"]
                 
-            # Применяем раскраску строк в таблице Streamlit (скрывая техническую колонку Тип подсветки)
-            styled_df = df_filtered.drop(columns=["Тип подсветки"]).style.apply(color_rows, axis=1)
+            # Применяем раскраску и скрываем техническую колонку
+            styled_df = df_filtered.style.apply(color_rows, axis=1)
+            styled_df = styled_df.hide(subset=["Тип подсветки"], axis="columns")
+            
             st.dataframe(styled_df, use_container_width=True)
             
             # Генерация Excel для скачивания
