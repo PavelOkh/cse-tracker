@@ -1,13 +1,13 @@
-import requests
-import pandas as pd
-import time
 import io
 import re
-import streamlit as st
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import openpyxl
 from openpyxl.styles import PatternFill
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(page_title="CSE Трекинг", page_icon="📦", layout="wide")
 
@@ -53,52 +53,26 @@ def process_single_number(number):
         waybill_info = history_dict.get('waybill_info', [])
         order_info = history_dict.get('order_info', [])
         
-        # Определяем, является ли сам этот запрашиваемый трек дочерним (возвратным)
-        is_child_waybill = "возврат" in state.lower() or "добавочная" in info.lower() or "регламент" in info.lower() or "retunwaybill" in str(track_data).lower() or "возвратная" in str(track_data).lower()
-        
-        # СЦЕНАРИЙ А: Запрошенный номер — ДОЧЕРНИЙ (ищем его родителя)
-        if is_child_waybill:
-            all_events = waybill_info + order_info
-            for event in all_events:
-                ev_info = event.get("EventInfo", "")
-                matches = re.findall(r'(497-[\d\-A-Z]+)', ev_info)
-                for match in matches:
-                    cleaned = match.strip(".,;")
-                    if cleaned != number:
-                        original_waybill_number = cleaned
-                        break
-                if original_waybill_number:
-                    break
-        # СЦЕНАРИЙ Б: Запрошенный номер — РОДИТЕЛЬСКИЙ (ищем дочерний в Document)
-        else:
-            for event in waybill_info:
-                doc = event.get('Document')
-                if doc and isinstance(doc, dict):
-                    doc_number = doc.get('Number', '')
-                    doc_state = doc.get('State', '')
-                    if doc_number and doc_number != number:
-                        new_waybill_number = doc_number
-                        new_state = doc_state
-                        
-                        doc_history = doc.get('History', [])
-                        if doc_history:
-                            new_last_status_date = doc_history[0].get('EventDate', '')
-                            
-                        for sub_event in doc_history:
-                            if "Доставка завершена" in sub_event.get('EventName', ''):
-                                new_delivery_date = sub_event.get('EventDate', '')
-                                break
-                        break
-
-            if not new_waybill_number and ("возврат" in state.lower() or "возвращается" in current_status.lower()):
-                parts = current_status.split()
-                for p in parts:
-                    cleaned_p = p.strip(".,;")
-                    if "497-" in cleaned_p and cleaned_p != number:
-                        new_waybill_number = cleaned_p
-                        break
-
+        # 1. Поиск дочернего документа (если текущий номер — родитель)
         for event in waybill_info:
+            doc = event.get('Document')
+            if doc and isinstance(doc, dict):
+                doc_number = doc.get('Number', '')
+                doc_state = doc.get('State', '')
+                if doc_number and doc_number != number:
+                    new_waybill_number = doc_number
+                    new_state = doc_state
+                    
+                    doc_history = doc.get('History', [])
+                    if doc_history:
+                        new_last_status_date = doc_history[0].get('EventDate', '')
+                        
+                    for sub_event in doc_history:
+                        if "Доставка завершена" in sub_event.get('EventName', ''):
+                            new_delivery_date = sub_event.get('EventDate', '')
+                            break
+                    break
+
             event_name = event.get('EventName', '')
             event_name_en = event.get('EventNameEn', '')
             event_date = event.get('EventDate', '')
@@ -110,7 +84,30 @@ def process_single_number(number):
                 highlight_type = "нет"
                 break
 
-        if waybill_info:
+        # Если новый номер не нашёлся через Document, проверяем текст статуса
+        if not new_waybill_number and ("возврат" in state.lower() or "возвращается" in current_status.lower() or "смена" in current_status.lower()):
+            parts = current_status.split()
+            for p in parts:
+                cleaned_p = p.strip(".,;")
+                if "497-" in cleaned_p and cleaned_p != number:
+                    new_waybill_number = cleaned_p
+                    break
+
+        # 2. Если дочерний номер не найден — проверяем, является ли номер дочерним (ищем родителя в истории)
+        if not new_waybill_number:
+            all_events = waybill_info + order_info
+            for event in all_events:
+                ev_info = event.get("EventInfo", "")
+                matches = re.findall(r'(497-[\d\-A-Z]+)', ev_info)
+                for match in matches:
+                    cleaned = match.strip(".,;")
+                    if cleaned != number:
+                        original_waybill_number = cleaned
+                        break
+                if original_waybill_number:
+                    break
+
+        if waybill_info and not delivery_date:
             last_status_date = waybill_info[0].get('EventDate', '')
 
         if "возврат" in state.lower() or "возвращается" in current_status.lower():
@@ -134,7 +131,7 @@ def process_single_number(number):
             "Тип подсветки": highlight_type
         }
 
-    except Exception as e:
+    except Exception:
         return {
             "Накладная": number, "Статус": "Ошибка обработки", "Дата доставки": "",
             "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
@@ -211,7 +208,7 @@ def main():
                 if uploaded_file.name.endswith('.csv'):
                     try:
                         df_input = pd.read_csv(uploaded_file, encoding='utf-8')
-                    except:
+                    except Exception:
                         df_input = pd.read_csv(uploaded_file, encoding='cp1251')
                 else:
                     df_input = pd.read_excel(uploaded_file)
@@ -227,7 +224,7 @@ def main():
             items = re.split(r'[\r\n,\t;]+', raw_text)
             tracking_list = [item.strip() for item in items if item.strip()]
             if len(tracking_list) > 1000:
-                st.warning("⚠️ Внимание: вставлено более 1000 номеров. Для стабильной работы будут обработаны первые 1000.")
+                st.warning("⚠️ Внимание: вставлено более 1000 номеров. Будут обработаны первые 1000.")
                 tracking_list = tracking_list[:1000]
 
     if tracking_list:
@@ -297,15 +294,14 @@ def main():
             elif display_filter == "Доставленные":
                 df_filtered = df_output[df_output["Статус"] == "Доставка завершена"]
                 
-            # Применение раскраски и скрытие технической колонки
+            # Стилизация и скрытие технической колонки
             styled_df = df_filtered.style.apply(color_rows, axis=1)
             styled_df = styled_df.hide(subset=["Тип подсветки"], axis="columns")
             
             st.dataframe(styled_df, use_container_width=True)
             
-            # Генерация Excel для скачивания
+            # Генерация и выгрузка Excel
             excel_data = generate_colored_excel(df_output)
-            
             current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             download_name = f"CSE_Результат_{current_time}.xlsx"
             
