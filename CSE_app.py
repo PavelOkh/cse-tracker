@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import openpyxl
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font
 import pandas as pd
 import requests
 import streamlit as st
@@ -84,7 +84,6 @@ def process_single_number(number):
                 highlight_type = "нет"
                 break
 
-        # Если новый номер не нашёлся через Document, проверяем текст статуса
         if not new_waybill_number and ("возврат" in state.lower() or "возвращается" in current_status.lower() or "смена" in current_status.lower()):
             parts = current_status.split()
             for p in parts:
@@ -135,8 +134,54 @@ def process_single_number(number):
         return {
             "Накладная": number, "Статус": "Ошибка обработки", "Дата доставки": "",
             "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
-            "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
+            "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "ошибка"
         }
+
+def fetch_with_smart_retries(unique_numbers, progress_callback):
+    """Многопроходная обработка с отложенными повторными запросами (до 5 попыток)"""
+    results_dict = {}
+    current_batch = list(unique_numbers)
+    total_unique = len(unique_numbers)
+    
+    for attempt in range(1, 6):
+        if not current_batch:
+            break
+            
+        if attempt > 1:
+            # Увеличенный интервал ожидания для отложенного списка (2с, 5с, 10с, 15с)
+            wait_time = [0, 2, 5, 10, 15][attempt - 1]
+            progress_callback(None, f"Попытка {attempt}/5: повторный опрос {len(current_batch)} накладных (ожидание {wait_time}с)...")
+            time.sleep(wait_time)
+        
+        failed_batch = []
+        completed_in_pass = 0
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_num = {executor.submit(process_single_number, num): num for num in current_batch}
+            for future in as_completed(future_to_num):
+                num = future_to_num[future]
+                completed_in_pass += 1
+                try:
+                    res = future.result()
+                    if res["Статус"] == "Ошибка обработки" and attempt < 5:
+                        failed_batch.append(num)
+                    results_dict[num] = res
+                except Exception:
+                    if attempt < 5:
+                        failed_batch.append(num)
+                    results_dict[num] = {
+                        "Накладная": num, "Статус": "Ошибка обработки", "Дата доставки": "",
+                        "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
+                        "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "ошибка"
+                    }
+                
+                # Общий прогресс текущего прохода
+                processed_count = len(unique_numbers) - len(current_batch) + completed_in_pass
+                progress_callback(processed_count / total_unique, f"Обработка (попытка {attempt}/5): {processed_count}/{total_unique}")
+                
+        current_batch = failed_batch
+        
+    return results_dict
 
 def generate_colored_excel(df_data):
     output = io.BytesIO()
@@ -150,6 +195,8 @@ def generate_colored_excel(df_data):
     yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
     purple_fill = PatternFill(start_color="E1D5E7", end_color="E1D5E7", fill_type="solid")
     red_fill = PatternFill(start_color="F8CECC", end_color="F8CECC", fill_type="solid")
+    grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+    red_font = Font(color="9C0006", bold=True)
     
     headers = [cell.value for cell in ws[1]]
     type_col_idx = headers.index("Тип подсветки") + 1
@@ -157,16 +204,25 @@ def generate_colored_excel(df_data):
     for row_idx in range(2, ws.max_row + 1):
         highlight_type = ws.cell(row=row_idx, column=type_col_idx).value
         target_fill = None
+        target_font = None
+        
         if highlight_type == "желтый":
             target_fill = yellow_fill
         elif highlight_type == "фиолетовый":
             target_fill = purple_fill
         elif highlight_type == "красный":
             target_fill = red_fill
+        elif highlight_type == "ошибка":
+            target_fill = grey_fill
+            target_font = red_font
             
-        if target_fill:
+        if target_fill or target_font:
             for col_idx in range(1, len(headers)):
-                ws.cell(row=row_idx, column=col_idx).fill = target_fill
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if target_fill:
+                    cell.fill = target_fill
+                if target_font:
+                    cell.font = target_font
                 
     ws.delete_cols(type_col_idx)
     
@@ -183,17 +239,20 @@ def color_rows(row):
         return ['background-color: #e1d5e7'] * len(row)
     elif h_type == "красный":
         return ['background-color: #f8cecc'] * len(row)
+    elif h_type == "ошибка":
+        return ['background-color: #d9d9d9; color: #9c0006; font-weight: bold'] * len(row)
     return [''] * len(row)
 
 def main():
     st.title("📦 Массовая проверка накладных CSE")
-    st.write("Инструмент автоматического отслеживания отправлений с сохранением порядка строк.")
+    st.write("Инструмент автоматического отслеживания отправлений с умными повторными попытками.")
 
     with st.expander("🎨 Справка по цветовой индикации"):
         st.markdown("""
         * 🟨 **Желтый фон** — доставка в процессе / не завершена.
         * 🟪 **Фиолетовый фон** — смена номера накладной (досыл / добавочная).
         * 🟥 **Красный фон** — оформлен возврат отправителю.
+        * ⬜ **Серо-красный** — ошибка обработки (система автоматически повторяла попытку до 5 раз).
         * *Без заливки* — доставка успешно завершена.
         """)
 
@@ -235,17 +294,16 @@ def main():
         
         if st.button("🚀 Начать проверку", type="primary"):
             start_time = time.time()
-            my_bar = st.progress(0, text="Идет опрос API CSE. Пожалуйста, подождите...")
+            my_bar = st.progress(0, text="Идет опрос API CSE...")
             
-            unique_results = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(process_single_number, num) for num in unique_numbers]
-                for i, future in enumerate(as_completed(futures)):
-                    unique_results.append(future.result())
-                    progress = (i + 1) / len(unique_numbers)
-                    my_bar.progress(progress, text=f"Обработано {i + 1} из {len(unique_numbers)} уникальных номеров...")
+            def update_progress(val, text):
+                if val is not None:
+                    my_bar.progress(val, text=text)
+                else:
+                    my_bar.progress(0.0, text=text)
             
-            results_dict = {res["Накладная"]: res for res in unique_results}
+            results_dict = fetch_with_smart_retries(unique_numbers, update_progress)
+            my_bar.empty()
             
             final_results = []
             for num in original_list:
@@ -257,9 +315,9 @@ def main():
                     })
                 else:
                     final_results.append(results_dict.get(num, {
-                        "Накладная": num, "Статус": "Ошибка кэша", "Дата доставки": "",
+                        "Накладная": num, "Статус": "Ошибка обработки", "Дата доставки": "",
                         "Дата посл. статуса": "", "Изначальный номер": "", "Новый номер": "", "Статус нового номера": "",
-                        "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "желтый"
+                        "Дата доставки нового": "", "Дата статуса нового": "", "Тип подсветки": "ошибка"
                     }))
             
             elapsed_time = round(time.time() - start_time, 1)
@@ -267,22 +325,31 @@ def main():
             
             df_output = pd.DataFrame(final_results)
             
-            # Сводные метрики
+            # Сводные метрики (теперь 6 колонок)
             total_count = len(final_results)
             delivered_count = sum(1 for r in final_results if r["Тип подсветки"] == "нет" and r["Статус"] == "Доставка завершена")
             yellow_count = sum(1 for r in final_results if r["Тип подсветки"] == "желтый")
             purple_count = sum(1 for r in final_results if r["Тип подсветки"] == "фиолетовый")
             red_count = sum(1 for r in final_results if r["Тип подсветки"] == "красный")
+            error_count = sum(1 for r in final_results if r["Тип подсветки"] == "ошибка")
             
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("📦 Всего строк", total_count)
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("📦 Всего", total_count)
             m2.metric("✅ Доставлено", delivered_count)
-            m3.metric("🟨 В пути / Ожидание", yellow_count)
+            m3.metric("🟨 В пути", yellow_count)
             m4.metric("🟪 Смена номера", purple_count)
             m5.metric("🟥 Возвраты", red_count)
+            m6.metric("⬜ Ошибки", error_count)
             
             # Фильтрация отображения
-            display_filter = st.selectbox("Фильтр отображения в таблице ниже:", ["Все строки", "Только в пути (желтые)", "Смена номера (фиолетовые)", "Возвраты (красные)", "Доставленные"])
+            display_filter = st.selectbox("Фильтр отображения в таблице ниже:", [
+                "Все строки", 
+                "Только в пути (желтые)", 
+                "Смена номера (фиолетовые)", 
+                "Возвраты (красные)", 
+                "Ошибки обработки",
+                "Доставленные"
+            ])
             
             df_filtered = df_output.copy()
             if display_filter == "Только в пути (желтые)":
@@ -291,6 +358,8 @@ def main():
                 df_filtered = df_output[df_output["Тип подсветки"] == "фиолетовый"]
             elif display_filter == "Возвраты (красные)":
                 df_filtered = df_output[df_output["Тип подсветки"] == "красный"]
+            elif display_filter == "Ошибки обработки":
+                df_filtered = df_output[df_output["Тип подсветки"] == "ошибка"]
             elif display_filter == "Доставленные":
                 df_filtered = df_output[df_output["Статус"] == "Доставка завершена"]
                 
