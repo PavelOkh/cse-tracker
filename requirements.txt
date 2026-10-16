@@ -1,6 +1,7 @@
-streamlit>=1.32,<2
+streamlit>=1.49,<2
 requests>=2.31,<3
 pandas>=2.2,<3
 openpyxl>=3.1,<4
 zeep>=4.2,<5
 beautifulsoup4>=4.12,<5
+playwright>=1.45,<2

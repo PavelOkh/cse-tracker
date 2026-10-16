@@ -22,13 +22,15 @@ def parse_public_html(number, html):
     if len(headings) != 1:
         raise PublicPageError('Не найдена однозначная информация по заказу; возможны загрузка JavaScript, отсутствие номера или изменение страницы')
     scope = headings[0].parent
-    while scope and not (scope.find(string=re.compile(r'Номер заказа')) and scope.find(string=re.compile(r'Дата доставки'))):
+    while scope and not (scope.find(string=re.compile(r'Номер заказа'))):
         scope = scope.parent
     if scope is None:
         raise PublicPageError('Не найдены поля заказа и даты доставки')
 
-    def field(label):
+    def field(label, optional=False):
         matches = scope.find_all(string=re.compile(r'^\s*' + re.escape(label) + r'\s*:?\s*$'))
+        if not matches and optional:
+            return ''
         if len(matches) != 1:
             raise PublicPageError('Не найдено однозначное поле: ' + label)
         parent = matches[0].parent
@@ -41,13 +43,15 @@ def parse_public_html(number, html):
             value = re.sub(r'^\s*' + re.escape(label) + r'\s*:?\s*', '', value).strip()
             if value:
                 return value
+            if optional and parent.find_all(recursive=False):
+                return ''
         raise PublicPageError('Пустое поле: ' + label)
 
     actual = field('Номер заказа')
     if actual != str(number):
         raise PublicPageError('Номер в ответе не совпадает с запрошенным')
-    date = field('Дата доставки')
-    if date in ('-', '—', '–'):
+    date = field('Дата доставки',optional=True)
+    if date in ('', '-', '—', '–'):
         date = ''
     elif re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', date):
         datetime.strptime(date, '%d.%m.%Y')
@@ -58,7 +62,7 @@ def parse_public_html(number, html):
         raise PublicPageError('Не найден однозначный статус отправления')
     status = statuses[0].strip()
     # Date alone is insufficient evidence of completed delivery.
-    delivered = bool(re.match(r'^Доставлен(?:[аоы])?(?:\s|\(|$)', status, re.I))
+    delivered = bool(re.match(r'^Доставлен(?:[аоы])?(?:\s*\([^)]*\))?\s*$', status, re.I))
     return {'Накладная':str(number), 'Статус':status,
             'Дата доставки':date if delivered else '',
             'Дата доставки на сайте':date,
